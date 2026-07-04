@@ -1,0 +1,21 @@
+{
+  "name": "codex-router-zcode-local",
+  "owner": {
+    "name": "jlcbk"
+  },
+  "metadata": {
+    "description": "Codex + GLM router for ZCode: review, delegate, and route by task difficulty.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "codex-router-zcode",
+      "description": "Use Codex from ZCode for code review or task delegation, with a GLM-by-default routing brain and a tunable Codex/GLM ratio.",
+      "version": "0.1.0",
+      "author": {
+        "name": "jlcbk"
+      },
+      "source": "./plugins/codex-router-zcode"
+    }
+  ]
+}

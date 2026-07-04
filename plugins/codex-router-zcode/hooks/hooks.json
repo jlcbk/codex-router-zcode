@@ -1,0 +1,16 @@
+{
+  "description": "Session bootstrap for codex-router-zcode: writes the plugin-root marker and deploys the rescue subagent + router skill so the command bodies (which cannot expand template vars) can locate the runtime.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${ZCODE_PLUGIN_ROOT}/scripts/bootstrap-session.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

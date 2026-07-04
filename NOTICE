@@ -1,0 +1,55 @@
+NOTICE
+======
+
+This project, codex-router-zcode, incorporates material from two upstream
+projects. Their licenses and attributions are preserved here.
+
+------------------------------------------------------------------------------
+1. OpenAI codex-plugin-cc  (Apache-2.0)
+------------------------------------------------------------------------------
+
+Source:   https://github.com/openai/codex-plugin-cc
+License:  Apache-2.0
+Pinned:   v1.0.5
+
+The Codex companion runtime (scripts/codex-companion.mjs and the lib/ helpers
+under it) is vendored as a git submodule at
+plugins/codex-router-zcode/scripts/vendor/codex-plugin-cc/, WITHOUT source
+modification. This project wraps that runtime with a thin adapter
+(scripts/zcode-adapter.mjs) so it can run under ZCode.
+
+The Apache-2.0 license and NOTICE from upstream are preserved inside the
+submodule directory. A copy of the Apache-2.0 license is available at
+https://www.apache.org/licenses/LICENSE-2.0.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+------------------------------------------------------------------------------
+2. jlcbk/codex-router-skill  (MIT)
+------------------------------------------------------------------------------
+
+Source:   https://github.com/jlcbk/codex-router-skill
+License:  MIT
+
+The routing brain (skills/codex-router/SKILL.md, references/codex-routing.md),
+the baseline rules (AGENTS.md), and the install.sh profile mechanism are
+derived from codex-router-skill (a project by the same author). They are
+re-licensed under this project's MIT license (see LICENSE), which is
+compatible with the upstream MIT license.
+
+------------------------------------------------------------------------------
+
+Trademarks: "Codex" and "OpenAI" are trademarks of OpenAI. "ZCode" and "GLM"
+are trademarks of Z.ai. This project is not affiliated with or endorsed by
+either, and uses these names only to describe interoperability with the
+relevant products.
