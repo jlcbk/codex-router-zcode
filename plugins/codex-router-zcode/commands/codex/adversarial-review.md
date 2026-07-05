@@ -45,6 +45,11 @@ node "$PLUGIN_ROOT/scripts/zcode-adapter.mjs" adversarial-review $ARGUMENTS
 
 Return stdout verbatim. No commentary, no fixes.
 
+> Network note: like `/codex:review`, this drives Codex via the app-server
+> broker and can stall on `chatgpt.com` TLS interception after the
+> file-reading phase. Cancel with `/codex:cancel <id>` if stuck, retry on a
+> healthy network.
+
 ## Background flow
 
 ```bash

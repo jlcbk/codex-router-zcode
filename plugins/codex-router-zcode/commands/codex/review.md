@@ -58,6 +58,13 @@ node "$PLUGIN_ROOT/scripts/zcode-adapter.mjs" review $ARGUMENTS
 Return the stdout verbatim, exactly as-is. Do not paraphrase, summarize, or add
 commentary. Do not fix any issues mentioned in the review output.
 
+> Network note: review drives Codex via the app-server broker, so in a network
+> environment where `chatgpt.com` is intercepted (TLS MITM proxy), the model
+> response can stall indefinitely after the file-reading phase — `/codex:status`
+> will show `phase: running` with no log progress. If that happens, cancel with
+> `/codex:cancel <id>` and retry on a healthy network. This is the same root
+> cause as `/codex:rescue --background` failures (see README "Known limitations").
+
 ## Background flow
 
 Launch the review with Bash in the background:
