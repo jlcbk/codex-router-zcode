@@ -19,7 +19,7 @@
 //
 // The submodule source is never modified.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -38,6 +38,58 @@ const COMPANION = path.join(
 );
 const TRANSFER_ZCODE = path.join(PLUGIN_ROOT, "scripts", "transfer-zcode.mjs");
 const MARKER_FILE = path.join(os.homedir(), ".zcode", "codex-router-zcode-root");
+
+// Valid subcommands. `task-direct` is a ZCode-specific addition that bypasses
+// the companion app-server broker and runs `codex exec` directly — used when
+// the broker is unreliable in a given environment (see README "Known
+// limitations" → app-server broker).
+const SUBCOMMANDS = [
+  "setup",
+  "review",
+  "adversarial-review",
+  "task",
+  "task-direct",
+  "transfer",
+  "status",
+  "result",
+  "cancel",
+];
+
+function printHelp() {
+  process.stdout.write(
+    [
+      "Usage: node zcode-adapter.mjs <subcommand> [args]",
+      "",
+      "Bridge between ZCode command bodies and the vendored codex-companion runtime.",
+      "",
+      "Subcommands forwarded to codex-companion (untouched argv):",
+      "  setup [--enable-review-gate|--disable-review-gate] [--json]",
+      "  review [--wait|--background] [--base <ref>] [--scope auto|working-tree|branch]",
+      "  adversarial-review [--wait|--background] [--base <ref>] [focus text]",
+      "  task [--background] [--write] [--resume-last] [--model <m>] [--effort <e>] [prompt]",
+      "  status [job-id] [--all] [--json]",
+      "  result [job-id] [--json]",
+      "  cancel [job-id] [--json]",
+      "",
+      "ZCode-specific subcommands:",
+      "  task-direct [--write] [--read-only] [prompt]   Run codex exec directly, bypassing",
+      "                                                  the app-server broker. Reliable when",
+      "                                                  the broker is flaky; no background jobs.",
+      "  transfer [--source <path>] [--json]             Summary-based handoff to a fresh Codex",
+      "                                                  session (reads the ZCode session DB).",
+      "",
+      "How command bodies locate this script:",
+      "  Read ~/.zcode/codex-router-zcode-root line 1 for PLUGIN_ROOT, then call",
+      "  node $PLUGIN_ROOT/scripts/zcode-adapter.mjs <subcommand> ...",
+      "",
+      "Environment:",
+      "  ZCode sets CLAUDE_PLUGIN_ROOT / CLAUDE_PLUGIN_DATA natively for plugin hooks.",
+      "  For direct CLI use this adapter reconstructs CLAUDE_PLUGIN_DATA from the marker",
+      "  file (or a tmp fallback) so the companion runtime can locate its state dir.",
+      "",
+    ].join("\n")
+  );
+}
 
 function readMarkerPluginData() {
   try {
@@ -79,18 +131,110 @@ function run(file, args) {
   });
 }
 
+function taskDirect(args) {
+  // ZCode-specific: run `codex exec` directly, bypassing the companion app-server
+  // broker. Used when the broker is unreliable (see README). Trade-off: no
+  // background jobs, no resume, no structured job tracking — just a direct,
+  // synchronous Codex run. Reliable.
+  let write = true;
+  let promptParts = [];
+  for (const a of args) {
+    if (a === "--write") {
+      write = true;
+    } else if (a === "--read-only") {
+      write = false;
+    } else {
+      promptParts.push(a);
+    }
+  }
+  const prompt = promptParts.join(" ").trim();
+  if (!prompt) {
+    process.stderr.write(
+      "task-direct: no prompt given. Usage: task-direct [--write|--read-only] <prompt>\n"
+    );
+    process.exit(2);
+  }
+  if (!fs.existsSync(COMPANION)) {
+    process.stderr.write(`zcode-adapter: codex-companion.mjs missing at ${COMPANION}\n`);
+    process.exit(1);
+  }
+
+  // Write prompt to a temp file to avoid argv length / escaping issues, then
+  // feed it via stdin with `codex exec -`.
+  const promptFile = path.join(os.tmpdir(), `codex-task-direct-${process.pid}.md`);
+  fs.writeFileSync(promptFile, prompt);
+  const resultFile = path.join(os.tmpdir(), `codex-task-direct-${process.pid}.out`);
+
+  const codexArgs = [
+    "exec",
+    "--json",
+    "--ephemeral",
+    "-s",
+    write ? "workspace-write" : "read-only",
+    "-C",
+    process.cwd(),
+    "-o",
+    resultFile,
+    "-",
+  ];
+
+  process.stderr.write("[task-direct] running codex exec directly (bypassing broker)...\n");
+  const child = spawn("codex", codexArgs, { stdio: ["pipe", "inherit", "inherit"] });
+  child.on("error", (err) => {
+    fs.unlink(promptFile, () => {});
+    process.stderr.write(`[task-direct] failed to launch codex: ${err.message}\n`);
+    process.exit(1);
+  });
+  child.stdin.write(prompt);
+  child.stdin.end();
+  child.on("close", (code) => {
+    fs.unlink(promptFile, () => {});
+    // Print the structured result if available, mirroring companion's shape.
+    try {
+      const raw = fs.readFileSync(resultFile, "utf8");
+      const parsed = JSON.parse(raw);
+      const sid = parsed.session_id || parsed.sessionId || null;
+      process.stdout.write("\n--- task-direct result ---\n");
+      if (sid) {
+        process.stdout.write(`Codex session: ${sid}\n`);
+        process.stdout.write(`Resume in Codex: codex resume ${sid}\n`);
+      }
+      if (parsed.rawOutput) {
+        process.stdout.write("\n" + parsed.rawOutput + "\n");
+      }
+    } catch {
+      // codex may not have produced structured output; rely on streamed stdout.
+    }
+    try {
+      fs.unlink(resultFile, () => {});
+    } catch {}
+    process.exit(code ?? 1);
+  });
+}
+
 function main() {
   const argv = process.argv.slice(2);
 
-  if (argv.length === 0) {
-    process.stderr.write(
-      "zcode-adapter: no subcommand given. Expected one of: setup, review, adversarial-review, task, transfer, status, result, cancel.\n"
-    );
-    process.exit(2);
+  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
+    if (argv.length === 0) {
+      // No subcommand: print help to stderr + exit 2 (treat as usage error).
+      printHelpToStderr();
+      process.exit(2);
+    }
+    printHelp();
+    process.exit(0);
   }
 
   const subcommand = argv[0];
   const rest = argv.slice(1);
+
+  if (!SUBCOMMANDS.includes(subcommand)) {
+    process.stderr.write(
+      `zcode-adapter: unknown subcommand '${subcommand}'. Expected one of: ${SUBCOMMANDS.join(", ")}.\n` +
+        "Run with --help for usage.\n"
+    );
+    process.exit(2);
+  }
 
   if (!fs.existsSync(COMPANION)) {
     process.stderr.write(
@@ -100,13 +244,18 @@ function main() {
     process.exit(1);
   }
 
+  // ZCode-specific: direct codex exec, bypassing the companion broker.
+  if (subcommand === "task-direct") {
+    ensurePluginDataEnv();
+    taskDirect(rest);
+    return;
+  }
+
   // `transfer` is the one subcommand upstream cannot honor on ZCode (no
   // transcript_path). Route it to the ZCode-specific summary-based handoff.
   if (subcommand === "transfer") {
     if (!fs.existsSync(TRANSFER_ZCODE)) {
-      process.stderr.write(
-        `zcode-adapter: transfer-zcode.mjs not found at ${TRANSFER_ZCODE}\n`
-      );
+      process.stderr.write(`zcode-adapter: transfer-zcode.mjs not found at ${TRANSFER_ZCODE}\n`);
       process.exit(1);
     }
     run(TRANSFER_ZCODE, rest);
@@ -115,6 +264,14 @@ function main() {
 
   ensurePluginDataEnv();
   run(COMPANION, argv);
+}
+
+function printHelpToStderr() {
+  process.stderr.write(
+    "zcode-adapter: no subcommand given. Expected one of: " +
+      SUBCOMMANDS.join(", ") +
+      ".\nRun with --help for usage.\n"
+  );
 }
 
 main();

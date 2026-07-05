@@ -100,17 +100,24 @@ SessionStart hook 会自动：写插件根路径 marker、部署 `codex-rescue` 
 **比例是审计目标，不是硬性随机比例。** 永远不要为了凑比例把简单任务交给 Codex。
 当前任务里的用户明确指令优先于 profile。
 
-## 双后端并存
+## 双模式：direct（默认，可靠）vs background（功能全）
 
-路由判断"要升级 Codex"后，按任务特征二选一：
+`/codex:rescue` 有两种执行模式：
 
-| 后端 | 触发方式 | 适合的任务 |
-| --- | --- | --- |
-| **高级后端（默认推荐）** | `/codex:rescue`、`/codex:review`、`/codex:adversarial-review`；`/codex:status`、`/codex:result`、`/codex:cancel` 管理；`/codex:transfer` 交接 | 需要 resume、后台长任务、结构化 review、跨文件重构 |
-| **fallback 后端** | `codex-engineer` 子 agent（直接 `codex exec`，每次起新进程、无状态） | 一次性硬任务、做完拉倒、到处能跑 |
+| 模式 | 触发 | 走什么 | 适合 |
+| --- | --- | --- | --- |
+| **direct（默认，可靠）** | `/codex:rescue <任务>` | `codex exec` 直连 | 绝大多数任务；不受 app-server broker 网络环境影响 |
+| **background（功能全）** | `/codex:rescue --background <任务>` | companion task + app-server broker | 需要 `/codex:status` 跟踪、`--resume` 续接、长任务后台跑 |
 
-选型：需要 resume / 后台跑 / 结构化 review → 高级后端；一次性硬任务 → fallback；
-不确定 → 默认高级后端。
+**为什么默认 direct**：background 模式依赖 codex app-server broker，在某些网络环境
+（如 TLS MITM 代理拦截 `chatgpt.com`）下会持续重连失败。direct 模式直连 `codex exec`，
+重试后通常能握手成功，更稳。代价是 direct 没有 job 跟踪/resume——但大多数一次性任务不需要这些。
+
+**选型**：一次性任务 → direct（默认）；要跟踪进度或续接 → 加 `--background`，失败了
+去掉 `--background` 重试即可。
+
+> `/codex:review` `/codex:adversarial-review` `/codex:status` `/codex:result` `/codex:cancel`
+> `/codex:setup` `/codex:transfer` 都各自独立工作，不受此 dual-mode 影响。
 
 ## 命令一览
 
@@ -119,7 +126,7 @@ SessionStart hook 会自动：写插件根路径 marker、部署 `codex-rescue` 
 | `/codex:setup` | 检查 Codex CLI 是否就绪 |
 | `/codex:review [--base <ref>] [--background]` | 对当前改动跑结构化代码审查（read-only） |
 | `/codex:adversarial-review [焦点文本]` | 可质疑的对抗式审查（挑战设计决策） |
-| `/codex:rescue [任务描述]` | 把任务交给 Codex（`--background`、`--resume`、`--model`、`--effort`） |
+| `/codex:rescue [任务描述]` | 把任务交给 Codex。默认 direct 模式（`codex exec` 直连，可靠）；`--background` 走后台 job（需 broker 健康） |
 | `/codex:status [job-id]` | 查看 Codex 任务状态 |
 | `/codex:result [job-id]` | 取回已完成任务的完整输出 |
 | `/codex:cancel [job-id]` | 取消后台任务 |
@@ -153,16 +160,40 @@ codex-router-zcode/
     ├── .zcode-plugin/plugin.json
     ├── hooks/hooks.json                # SessionStart → bootstrap
     ├── commands/codex/*.md             # 8 个命令（/codex:*）
-    ├── agents/{codex-rescue,codex-engineer}.md  # 双后端子 agent
+    ├── agents/{codex-rescue,codex-engineer}.md  # 子 agent 定义（参考用，见已知限制）
     ├── skills/codex-router/            # 路由大脑（SKILL.md + references/）
     └── scripts/
-        ├── bootstrap-session.mjs       # SessionStart：marker + agent/skill 部署
-        ├── zcode-adapter.mjs           # 命令体 → codex-companion 桥
+        ├── bootstrap-session.mjs       # SessionStart：marker + skill 镜像
+        ├── zcode-adapter.mjs           # 命令体 → codex-companion 桥 + task-direct
         ├── transfer-zcode.mjs          # 摘要式会话交接
         └── vendor/codex-plugin-cc/     # git submodule → openai/codex-plugin-cc v1.0.5
 ```
 
 ## 已知限制
+
+### ZCode 当前版本不从磁盘加载自定义子 agent
+
+ZCode（截至当前版本）**不把 `~/.zcode/agents/` 当作子 agent 发现路径**——子 agent 只能通过
+Settings → Subagents UI 注册。`Agent` 工具只认内置类型（`general-purpose`、`Explore`）。
+
+因此本仓库的 `agents/codex-rescue.md` 和 `agents/codex-engineer.md` **不会被自动加载**。
+`/codex:rescue` 的设计已绕开这点：命令体在主会话直接调 adapter（不经子 agent）。
+`agents/*.md` 文件保留在仓库里供参考，以及未来 ZCode 支持磁盘加载子 agent 时直接启用。
+
+### `/codex:rescue --background` 依赖 app-server broker，受网络环境影响
+
+background 模式走 codex app-server broker。在某些网络环境下——**尤其是有 TLS MITM 代理
+拦截 `chatgpt.com` 流量的环境**（症状：`invalid peer certificate: certificate not valid
+for name "chatgpt.com"; certificate is only valid for *.facebook.com`）——broker 的持久
+连接会被持续拦截，表现为 `Codex error: Reconnecting... 2/5` 直到失败。
+
+**这是网络环境问题，不是 Codex、codex-plugin-cc 或本仓库的 bug。** 解决办法：
+- 默认用 `/codex:rescue <任务>`（direct 模式，直连 `codex exec`，重试后常能握手成功）
+- 或修复网络环境（关掉拦截 chatgpt.com 的代理）
+- background 模式失败时，去掉 `--background` 重试
+
+`/codex:setup` `/codex:status` `/codex:result` `/codex:cancel` `/codex:review`
+`/codex:adversarial-review` 不受此影响（它们或走同步路径、或不依赖 broker 长连接）。
 
 ### `/codex:transfer` 是摘要式交接，非可 resume 的 thread
 

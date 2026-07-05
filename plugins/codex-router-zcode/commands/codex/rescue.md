@@ -1,10 +1,13 @@
 ---
-description: Delegate investigation, an explicit fix request, or follow-up rescue work to Codex via the codex-rescue subagent
-argument-hint: '[--background|--wait] [--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [what Codex should investigate, solve, or continue]'
-allowed-tools: Bash, AskUserQuestion, Agent
+description: Delegate investigation, an explicit fix request, or follow-up rescue work to Codex
+argument-hint: '[--background] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [what Codex should investigate, solve, or continue]'
+allowed-tools: Bash
 ---
 
-Hand a task to Codex through the `codex-rescue` subagent.
+Hand a task to Codex. By default this runs Codex directly (`codex exec`) for
+reliability — no background jobs, but it works even when the app-server broker
+is flaky. Pass `--background` for a tracked background job (resume, status,
+result) when the broker is healthy.
 
 ## Step 1 — locate the plugin runtime
 
@@ -13,71 +16,58 @@ cat ~/.zcode/codex-router-zcode-root
 ```
 
 Line 1 is `PLUGIN_ROOT`. If missing, tell the user to restart the ZCode session.
-Pass `PLUGIN_ROOT` to the subagent in the prompt so it can build the adapter
-call (the subagent reads the same marker file, but giving it the value saves a
-round-trip).
 
-## How to route this command
+## Step 2 — parse flags from the request
 
-Invoke the `codex-rescue` subagent via the `Agent` tool
-(`subagent_type: "codex-rescue"`), forwarding the raw user request as the
-prompt. **Do not** call `Skill(codex-rescue)` — it is a subagent, not a skill.
+From `$ARGUMENTS`, separate execution flags from the natural-language task:
 
-The command runs inline so the `Agent` tool stays in scope; forked
-general-purpose subagents do not expose it.
+- `--background` → use the companion `task` subcommand (tracked background job).
+  Trade-off: enables `/codex:status` / `/codex:result` / `--resume`, but relies
+  on the app-server broker, which may be unreliable in some network environments
+  (e.g. behind a MITM TLS proxy). If the job fails with "Reconnecting...", fall
+  back by re-running without `--background`.
+- `--model <name>` → pass through. Map `spark` to `gpt-5.3-codex-spark`.
+- `--effort <level>` → pass through (none|minimal|low|medium|high|xhigh).
+- Everything else is the task text.
 
-The final user-visible response must be Codex's output verbatim.
+If the user did not supply a task, ask what Codex should investigate or fix.
 
-## Raw user request
+## Step 3 — invoke Codex
 
-$ARGUMENTS
+**Default (direct, reliable — use unless `--background` was given):**
 
-## Execution mode (decide before spawning the subagent)
+```bash
+node "$PLUGIN_ROOT/scripts/zcode-adapter.mjs" task-direct --write "<task text>"
+```
 
-- If the request includes `--background`, run the `codex-rescue` subagent in the
-  background.
-- If the request includes `--wait`, run it in the foreground.
-- If neither flag is present, default to foreground.
-- `--background` and `--wait` are execution flags for the host. Do not forward
-  them as part of the natural-language task text.
-- `--model` and `--effort` are runtime-selection flags. Preserve them in the
-  forwarded prompt, but do not treat them as natural-language text.
-- If the request includes `--resume` or `--fresh`, do not ask about continuing —
-  the user already chose.
-- Otherwise, before spawning the subagent, check for a resumable rescue thread
-  from this session by running:
+Add `--read-only` instead of `--write` only if the user explicitly asked for
+review/diagnosis/research without edits.
 
-  ```bash
-  node "$PLUGIN_ROOT/scripts/zcode-adapter.mjs" __resume-candidate --json 2>/dev/null || true
-  ```
+**Background (tracked job, needs healthy broker):**
 
-  > Note: this helper may not exist in the current runtime; if the command
-  > errors or prints nothing, treat it as "no resumable thread" and proceed
-  > without asking.
+```bash
+node "$PLUGIN_ROOT/scripts/zcode-adapter.mjs" task --background --write "<task text>"
+```
 
-  - If a resumable thread is reported, use `AskUserQuestion` exactly once:
-    - `Continue current Codex thread`
-    - `Start a new Codex thread`
-    - If the user is clearly giving a follow-up ("continue", "keep going",
-      "resume", "apply the top fix", "dig deeper"), put
-      `Continue current Codex thread (Recommended)` first.
-    - Otherwise put `Start a new Codex thread (Recommended)` first.
-  - If they choose continue, add `--resume` before forwarding. If new, add
-    `--fresh`.
-  - If no resumable thread, route normally without asking.
+Then tell the user: "Codex task started in the background. Check `/codex:status`
+for progress and `/codex:result <id>` for output. If it fails with reconnect
+errors, re-run without `--background`."
 
-## Operating rules
+## Presenting the result
 
-- The `codex-rescue` subagent is a thin forwarder: it makes one Bash call to
-  `node "$PLUGIN_ROOT/scripts/zcode-adapter.mjs" task ...` and returns that
-  command's stdout as-is. Tell it the value of `PLUGIN_ROOT` in the prompt.
-- Return the subagent's output verbatim to the user. Do not paraphrase,
-  summarize, rewrite, or add commentary before or after.
-- Do not ask the subagent to inspect files, monitor progress, poll
-  `/codex:status`, fetch `/codex:result`, call `/codex:cancel`, summarize
-  output, or do follow-up work of its own.
-- Leave `--effort` unset unless the user explicitly asks for a specific effort.
-- Leave the model unset unless the user explicitly asks for one. If they ask
-  for `spark`, map it to `gpt-5.3-codex-spark`.
-- If the user did not supply a request, ask what Codex should investigate or
-  fix.
+- Return the command's stdout verbatim. Do not paraphrase, summarize, rewrite,
+  or add commentary before or after.
+- For `task-direct`: the result includes a Codex session id; tell the user they
+  can continue in Codex with `codex resume <id>`.
+- If the run fails with TLS/certificate/reconnect errors, explain that this is
+  a network-environment issue (a proxy is intercepting chatgpt.com traffic),
+  not a Codex or plugin bug — and that retrying sometimes succeeds.
+
+## Notes
+
+- `--resume` / `--fresh` only apply to the `--background` path (companion task
+  threads). `task-direct` always starts a fresh ephemeral Codex session.
+- This command intentionally does **not** route through a subagent. ZCode does
+  not load custom subagents from disk in this build, so the main session calls
+  the adapter directly. Job isolation in `--background` mode is provided by the
+  companion's job store, not by a subagent boundary.

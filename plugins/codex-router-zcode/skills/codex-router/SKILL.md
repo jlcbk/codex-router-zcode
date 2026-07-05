@@ -12,7 +12,7 @@ description: >
 你在 GLM（默认执行层）和 Codex（专家升级层）之间做路由判断。
 
 > 本文件是路由大脑入口。详细路由矩阵（能力打分、成本模型、升级纪律、子 agent
-> 提示词、双后端选型规则）在 `references/codex-routing.md`，设计工作流或写
+> 提示词、双模式选型规则）在 `references/codex-routing.md`，设计工作流或写
 > 委托提示词时务必读它。
 
 **你的核心目标：尽量省 Codex token。** Codex 贵、慢、是稀缺资源。GLM 便宜、
@@ -21,21 +21,28 @@ description: >
 你不是执行器，你是**裁判**。判断完路由后：
 
 - 路由到 GLM → 直接在本会话做，不要委托
-- 路由到 Codex → 把任务规格化后，按下面的双后端选一个交出去
+- 路由到 Codex → 把任务规格化后，用 `/codex:rescue` 交出去（默认 direct 模式）
 
-## 执行后端（升级 Codex 的具体方式）—— 双后端并存
+## 执行后端（升级 Codex 的具体方式）—— 双模式
 
-判断要升级后，按任务特征二选一。**这是 codex-router-zcode 的关键设计**：
+判断要升级后，`/codex:rescue` 按任务特征选模式。**这是 codex-router-zcode 的关键设计**：
 
-| 后端 | 触发方式 | 适合的任务 |
+| 模式 | 触发方式 | 适合的任务 |
 | --- | --- | --- |
-| **高级后端（默认，推荐）** | `codex-rescue` 子 agent 或主会话调 `/codex:rescue`、`/codex:review`、`/codex:adversarial-review`；用 `/codex:status`、`/codex:result`、`/codex:cancel` 管理 | 需要 resume、后台长任务、结构化 review、adversarial review、跨文件重构 |
-| **fallback 后端** | 委托给 `codex-engineer` 子 agent（如果已安装；它直接 `codex exec` 起新进程） | 一次性硬任务、做完拉倒、无状态、到处能跑 |
+| **direct（默认，可靠）** | `/codex:rescue <任务>` → 主会话直调 adapter 的 `codex exec` 路径 | 一次性硬任务、做完拉倒；不受 app-server broker 网络环境影响 |
+| **background（功能全）** | `/codex:rescue --background <任务>` → companion task + broker；用 `/codex:status`、`/codex:result`、`/codex:cancel` 管理 | 需要 resume、后台长任务、跟踪进度 |
+
+另有 read-only 审查命令：`/codex:review`、`/codex:adversarial-review`（结构化第二意见）、
+`/codex:transfer`（摘要式会话交接）。
 
 选型规则：
-- 任务需要**续接**之前的工作（resume）、**后台跑**、或要**结构化 review** → 高级后端
-- 任务是**一次性**的、且 `codex-engineer` 已安装 → 可走 fallback（更轻、无状态）
-- 不确定 → 默认高级后端（能力更全）
+- 任务需要**续接**之前的工作（resume）、**后台跑**、或要**结构化 review** → `/codex:review` / `--background`
+- 任务是**一次性**的 → direct（默认），最可靠
+- 不确定 → direct（默认）；失败再加 `--background` 或反之
+
+> **注意**：ZCode 当前版本不从磁盘加载自定义子 agent，所以 `/codex:rescue` 在主会话
+> 直接调 adapter（不经子 agent 边界）。background 模式的 job 隔离由 companion job store
+> 提供，不依赖子 agent。详见 README「已知限制」。
 
 详细决策框架与路由表见 `references/codex-routing.md`。
 

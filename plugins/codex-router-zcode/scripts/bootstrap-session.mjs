@@ -1,20 +1,24 @@
 #!/usr/bin/env node
 // bootstrap-session.mjs — ZCode SessionStart hook entry point.
 //
-// ZCode does NOT expand template variables inside command .md bodies, and a
-// plugin cannot ship a runnable subagent (the manifest `agents` field is
-// "recorded but not executed"). This hook closes both gaps once per session
-// start:
+// ZCode does NOT expand template variables inside command .md bodies. This hook
+// closes that gap once per session start:
 //
 //   1. Write a marker file (~/.zcode/codex-router-zcode-root) recording the
-//      plugin root + plugin-data paths, so command bodies and the rescue
-//      subagent can read it and locate the runtime.
-//   2. Idempotently copy agents/codex-rescue.md into ~/.zcode/agents/.
-//   3. Idempotently mirror skills/codex-router into ~/.agents/skills/.
+//      plugin root + plugin-data paths, so command bodies can read it and
+//      locate the runtime.
+//   2. Idempotently mirror skills/codex-router into ~/.agents/skills/.
 //
 // It emits nothing on stdout (ZCode enforces a strict hook output schema), and
 // never exits non-zero on a soft failure — a broken bootstrap must not block
 // the session from starting.
+//
+// NOTE on subagents: ZCode (as of the current build) does not load custom
+// subagents from ~/.zcode/agents/ — subagents are registered only via the
+// Settings → Subagents UI. We therefore do NOT try to deploy agent files here;
+// /codex:rescue and the fallback path invoke the adapter directly from the
+// main session instead. The agents/*.md files are kept in the plugin for
+// reference and for future ZCode builds that may support disk-loaded agents.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -23,7 +27,6 @@ import { createHash } from "node:crypto";
 
 const HOME = os.homedir();
 const MARKER_FILE = path.join(HOME, ".zcode", "codex-router-zcode-root");
-const AGENTS_DEST_DIR = path.join(HOME, ".zcode", "agents");
 const SKILLS_DEST_DIR = path.join(HOME, ".agents", "skills");
 
 // The plugin root is passed via env (ZCode expands ${ZCODE_PLUGIN_ROOT} in the
@@ -145,7 +148,7 @@ function main() {
   // reading it keeps the pipe from breaking on some platforms.
   readStdin();
 
-  const summary = { marker: false, agents: {}, skillFiles: 0 };
+  const summary = { marker: false, skillFiles: 0 };
 
   // 1. Marker file.
   const pluginRoot = process.env.ZCODE_PLUGIN_ROOT || process.env.CLAUDE_PLUGIN_ROOT || "";
@@ -155,22 +158,9 @@ function main() {
     summary.marker = writeIfChanged(MARKER_FILE, payload);
   }
 
-  // 2. Deploy subagents into ~/.zcode/agents/. Both the high-end rescue agent
-  // and the fallback codex-engineer agent live in the plugin's agents/ dir;
-  // mirror every .md file there so adding a future agent needs no code change.
-  const agentsSrcDir = path.join(PLUGIN_ROOT, "agents");
-  try {
-    for (const entry of fs.readdirSync(agentsSrcDir, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
-      const src = path.join(agentsSrcDir, entry.name);
-      const dest = path.join(AGENTS_DEST_DIR, entry.name);
-      summary.agents[entry.name] = copyIfChanged(src, dest);
-    }
-  } catch {
-    // agents/ missing — skip
-  }
-
-  // 3. Mirror the router skill into ~/.agents/skills/codex-router/.
+  // 2. Mirror the router skill into ~/.agents/skills/codex-router/.
+  // (We do NOT deploy subagents: ZCode does not load them from disk in this
+  // build — see the file header note.)
   const skillSrc = path.join(PLUGIN_ROOT, "skills", "codex-router");
   const skillDest = path.join(SKILLS_DEST_DIR, "codex-router");
   summary.skillFiles = mirrorTree(skillSrc, skillDest);

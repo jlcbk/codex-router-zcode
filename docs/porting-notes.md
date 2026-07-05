@@ -51,26 +51,51 @@ would leak through literally.
 This trades one extra model round-trip (read marker, then Bash) for
 correctness. It is the standard ZCode command pattern.
 
-### 3. Plugin cannot ship a runnable subagent
+### 3. ZCode does not load custom subagents from disk
 
 **Upstream**: codex-plugin-cc ships `agents/codex-rescue.md` and references it
 as `Agent(subagent_type: "codex:codex-rescue")`.
 
 **ZCode**: the plugin manifest's `agents` field is **"recorded but not
-executed"** — a plugin cannot ship a working subagent. (Confirmed in the
-zcode-guide `diagnosing-plugins` skill.)
+executed"** (confirmed in the zcode-guide `diagnosing-plugins` skill). More
+significantly, **ZCode does not treat `~/.zcode/agents/` as a discovery path
+at all** — custom subagents are registered only via the Settings → Subagents
+UI, and the `Agent` tool exposes only built-in types (`general-purpose`,
+`Explore`). This was discovered empirically during end-to-end testing: copying
+`agents/*.md` into `~/.zcode/agents/` did **not** make them available as
+`subagent_type` values.
 
-**Resolution**: the SessionStart hook (`bootstrap-session.mjs`) idempotently
-copies every `agents/*.md` from the plugin into `~/.zcode/agents/` at session
-start (hash-compared, so it only writes on change). From there ZCode picks
-them up as runnable user-level subagents. `/codex:rescue` invokes
-`Agent(subagent_type: "codex-rescue")`.
+**Resolution**: the `/codex:rescue` command body does **not** route through a
+subagent. Instead it runs in the main session: read the marker, then call the
+adapter directly. The companion's job store provides output isolation in
+`--background` mode, so a subagent boundary is not needed for that either.
 
-The copy logic also handles a destination that is a symlink (e.g. a prior
-`codex-router-skill` install left a symlink): it `lstatSync`s and `unlinkSync`s
-non-regular files before writing, so we end up owning a real file.
+The `agents/*.md` files are kept in the plugin for reference and for a future
+ZCode build that may support disk-loaded subagents. They are **not** deployed
+by the bootstrap hook (deploying them had no effect).
 
-### 4. `CLAUDE_ENV_FILE` (SessionStart env export)
+### 4. app-server broker unreliable under TLS MITM proxies (task-direct fallback)
+
+**Upstream**: the companion `task --background` subcommand drives Codex via a
+long-lived app-server broker process.
+
+**Problem observed**: in network environments where a TLS MITM proxy intercepts
+`chatgpt.com` traffic (symptom: `invalid peer certificate: certificate not
+valid for name "chatgpt.com"; certificate is only valid for *.facebook.com`),
+the broker's persistent connection is repeatedly torn down
+(`Codex error: Reconnecting... 2/5` ... `5/5`, then `phase: failed`). The job
+is recorded but never recovers. This is a property of the network environment,
+**not** a bug in Codex, codex-plugin-cc, or this adapter.
+
+**Resolution**: `zcode-adapter.mjs` exposes a `task-direct` subcommand that
+runs `codex exec` directly (no broker, no app-server). The `/codex:rescue`
+command body uses `task-direct` by default and only routes to the companion
+`task --background` when the user explicitly passes `--background`. Direct
+`codex exec` still hits the same TLS interception, but its shorter-lived
+connections succeed after the standard 5-reconnect retry more often than the
+broker's persistent connection does.
+
+### 5. `CLAUDE_ENV_FILE` (SessionStart env export)
 
 **Upstream**: `session-lifecycle-hook.mjs` writes `KEY=value` lines to
 `$CLAUDE_ENV_FILE` to export `CODEX_COMPANION_SESSION_ID`,
@@ -86,7 +111,7 @@ isolation is driven by `CLAUDE_PLUGIN_DATA` (set by ZCode itself, not by our
 hook) and `cwd`. The marker file carries the plugin root to where env is
 unavailable.
 
-### 5. `transcript_path` (for `/codex:transfer`)
+### 6. `transcript_path` (for `/codex:transfer`)
 
 **Upstream**: `claude-session-transfer.mjs` reads
 `process.env.CODEX_COMPANION_TRANSCRIPT_PATH` (populated by the SessionStart
@@ -100,7 +125,7 @@ the main session is not stored as JSONL at all.
 a ZCode-specific `transfer-zcode.mjs`, which renders a compressed summary from
 the SQLite session store instead. See [`transfer-design.md`](transfer-design.md).
 
-### 6. Stop hook (review gate)
+### 7. Stop hook (review gate)
 
 **Upstream**: `hooks/hooks.json` registers a `Stop` hook that runs a Codex
 review after each assistant turn, blocking the stop if it finds issues.
@@ -113,7 +138,7 @@ Stop hook code remains in the vendored submodule (we do not modify it) but is
 never wired up. `/codex:setup --enable-review-gate` is accepted and recorded
 for forward compatibility but has no live effect.
 
-### 7. Hook stdin field names
+### 8. Hook stdin field names
 
 **Upstream**: hooks read `session_id`, `transcript_path`, `cwd`,
 `last_assistant_message`, `tool_name`, etc. from stdin JSON.
